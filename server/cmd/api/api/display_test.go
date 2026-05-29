@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kernel/kernel-images/server/lib/logger"
+	oapi "github.com/kernel/kernel-images/server/lib/oapi"
 	"github.com/kernel/kernel-images/server/lib/recorder"
 	"github.com/kernel/kernel-images/server/lib/scaletozero"
 	"github.com/stretchr/testify/assert"
@@ -251,6 +252,103 @@ func TestStopAndStartNewSegment_RoundTrip(t *testing.T) {
 	assert.True(t, newRec.IsRecording(ctx))
 
 	_ = newRec.Stop(ctx)
+}
+
+func TestResolveDisplayParams(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	rrPtr := func(v int) *oapi.PatchDisplayRequestRefreshRate {
+		x := oapi.PatchDisplayRequestRefreshRate(v)
+		return &x
+	}
+
+	cases := []struct {
+		name                 string
+		body                 *oapi.PatchDisplayJSONRequestBody
+		curW, curH, curRR    int
+		wantW, wantH, wantRR int
+		wantChanged          bool
+	}{
+		{
+			name: "matching dims, no refresh rate",
+			body: &oapi.PatchDisplayJSONRequestBody{Width: intPtr(1920), Height: intPtr(1080)},
+			curW: 1920, curH: 1080, curRR: 25,
+			wantW: 1920, wantH: 1080, wantRR: 25,
+			wantChanged: false,
+		},
+		{
+			name: "matching dims and matching refresh rate",
+			body: &oapi.PatchDisplayJSONRequestBody{Width: intPtr(1920), Height: intPtr(1080), RefreshRate: rrPtr(60)},
+			curW: 1920, curH: 1080, curRR: 60,
+			wantW: 1920, wantH: 1080, wantRR: 60,
+			wantChanged: false,
+		},
+		{
+			name: "different width",
+			body: &oapi.PatchDisplayJSONRequestBody{Width: intPtr(1280), Height: intPtr(1080)},
+			curW: 1920, curH: 1080, curRR: 25,
+			wantW: 1280, wantH: 1080, wantRR: 25,
+			wantChanged: true,
+		},
+		{
+			name: "different refresh rate, matching dims",
+			body: &oapi.PatchDisplayJSONRequestBody{Width: intPtr(1920), Height: intPtr(1080), RefreshRate: rrPtr(60)},
+			curW: 1920, curH: 1080, curRR: 25,
+			wantW: 1920, wantH: 1080, wantRR: 60,
+			wantChanged: true,
+		},
+		{
+			name: "only width supplied, matches current",
+			body: &oapi.PatchDisplayJSONRequestBody{Width: intPtr(1920)},
+			curW: 1920, curH: 1080, curRR: 25,
+			wantW: 1920, wantH: 1080, wantRR: 25,
+			wantChanged: false,
+		},
+		{
+			name: "nil body",
+			body: nil,
+			curW: 1920, curH: 1080, curRR: 25,
+			wantW: 1920, wantH: 1080, wantRR: 25,
+			wantChanged: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, h, rr, changed := resolveDisplayParams(tc.body, tc.curW, tc.curH, tc.curRR)
+			assert.Equal(t, tc.wantW, w)
+			assert.Equal(t, tc.wantH, h)
+			assert.Equal(t, tc.wantRR, rr)
+			assert.Equal(t, tc.wantChanged, changed)
+		})
+	}
+}
+
+func TestHeadlessRefreshRateSticky(t *testing.T) {
+	t.Run("setViewportOverride records sticky rate", func(t *testing.T) {
+		svc := &ApiService{}
+		svc.setViewportOverride(1280, 720, 25)
+		assert.Equal(t, 25, svc.lastHeadlessRefreshRate)
+	})
+
+	t.Run("clearViewportOverride preserves sticky rate", func(t *testing.T) {
+		svc := &ApiService{}
+		svc.setViewportOverride(1280, 720, 25)
+		svc.clearViewportOverride()
+		assert.Nil(t, svc.viewportOverride)
+		assert.Equal(t, 25, svc.lastHeadlessRefreshRate)
+	})
+
+	t.Run("recordHeadlessRefreshRate ignores zero", func(t *testing.T) {
+		svc := &ApiService{lastHeadlessRefreshRate: 30}
+		svc.recordHeadlessRefreshRate(0)
+		assert.Equal(t, 30, svc.lastHeadlessRefreshRate)
+	})
+
+	t.Run("recordHeadlessRefreshRate updates sticky rate", func(t *testing.T) {
+		svc := &ApiService{lastHeadlessRefreshRate: 30}
+		svc.recordHeadlessRefreshRate(75)
+		assert.Equal(t, 75, svc.lastHeadlessRefreshRate)
+	})
 }
 
 func TestProbeDisplayMode(t *testing.T) {
