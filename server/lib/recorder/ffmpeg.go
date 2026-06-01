@@ -36,6 +36,11 @@ const (
 // currently being finalized (remuxed to add duration metadata).
 var ErrRecordingFinalizing = errors.New("recording is being finalized")
 
+// ErrInvalidParams indicates the requested recording parameters are invalid for
+// this server (e.g. audio requested without a configured source/socket). Callers
+// can use errors.Is to surface a client-facing error instead of a 500.
+var ErrInvalidParams = errors.New("invalid recording parameters")
+
 // FFmpegRecorder encapsulates an FFmpeg recording session with platform-specific screen capture.
 // It manages the lifecycle of a single FFmpeg process and provides thread-safe operations.
 type FFmpegRecorder struct {
@@ -69,6 +74,9 @@ type FFmpegRecordingParams struct {
 	// MaxDurationInSeconds optionally limits the total recording time. If nil there is no duration limit.
 	MaxDurationInSeconds *int
 	OutputDir            *string
+	RecordAudio          *bool
+	AudioSource          *string
+	PulseServer          *string
 }
 
 func (p FFmpegRecordingParams) Validate() error {
@@ -87,8 +95,37 @@ func (p FFmpegRecordingParams) Validate() error {
 	if p.MaxDurationInSeconds != nil && *p.MaxDurationInSeconds <= 0 {
 		return fmt.Errorf("max duration must be greater than 0 seconds")
 	}
+	// Audio capture is opt-in per recording. When enabled, the server must have
+	// both the pulse source to read and the daemon socket to reach it (the image
+	// configures both); otherwise ffmpeg would fail at runtime.
+	if p.recordAudio() {
+		if strings.TrimSpace(p.audioSource()) == "" {
+			return fmt.Errorf("audio source is required when recording audio")
+		}
+		if strings.TrimSpace(p.pulseServer()) == "" {
+			return fmt.Errorf("pulse server is required when recording audio")
+		}
+	}
 
 	return nil
+}
+
+func (p FFmpegRecordingParams) recordAudio() bool {
+	return p.RecordAudio != nil && *p.RecordAudio
+}
+
+func (p FFmpegRecordingParams) audioSource() string {
+	if p.AudioSource == nil {
+		return ""
+	}
+	return *p.AudioSource
+}
+
+func (p FFmpegRecordingParams) pulseServer() string {
+	if p.PulseServer == nil {
+		return ""
+	}
+	return *p.PulseServer
 }
 
 type FFmpegRecorderFactory func(id string, overrides FFmpegRecordingParams) (Recorder, error)
@@ -99,6 +136,9 @@ type FFmpegRecorderFactory func(id string, overrides FFmpegRecordingParams) (Rec
 func NewFFmpegRecorderFactory(pathToFFmpeg string, config FFmpegRecordingParams, ctrl scaletozero.Controller) FFmpegRecorderFactory {
 	return func(id string, overrides FFmpegRecordingParams) (Recorder, error) {
 		mergedParams := mergeFFmpegRecordingParams(config, overrides)
+		if err := mergedParams.Validate(); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidParams, err)
+		}
 		return &FFmpegRecorder{
 			id:         id,
 			binaryPath: pathToFFmpeg,
@@ -116,6 +156,9 @@ func mergeFFmpegRecordingParams(config FFmpegRecordingParams, overrides FFmpegRe
 		MaxSizeInMB:          config.MaxSizeInMB,
 		MaxDurationInSeconds: config.MaxDurationInSeconds,
 		OutputDir:            config.OutputDir,
+		RecordAudio:          config.RecordAudio,
+		AudioSource:          config.AudioSource,
+		PulseServer:          config.PulseServer,
 	}
 	if overrides.FrameRate != nil {
 		merged.FrameRate = overrides.FrameRate
@@ -131,6 +174,15 @@ func mergeFFmpegRecordingParams(config FFmpegRecordingParams, overrides FFmpegRe
 	}
 	if overrides.OutputDir != nil {
 		merged.OutputDir = overrides.OutputDir
+	}
+	if overrides.RecordAudio != nil {
+		merged.RecordAudio = overrides.RecordAudio
+	}
+	if overrides.AudioSource != nil {
+		merged.AudioSource = overrides.AudioSource
+	}
+	if overrides.PulseServer != nil {
+		merged.PulseServer = overrides.PulseServer
 	}
 
 	return merged
@@ -169,6 +221,18 @@ func (p FFmpegRecordingParams) clone() FFmpegRecordingParams {
 	if p.OutputDir != nil {
 		v := *p.OutputDir
 		c.OutputDir = &v
+	}
+	if p.RecordAudio != nil {
+		v := *p.RecordAudio
+		c.RecordAudio = &v
+	}
+	if p.AudioSource != nil {
+		v := *p.AudioSource
+		c.AudioSource = &v
+	}
+	if p.PulseServer != nil {
+		v := *p.PulseServer
+		c.PulseServer = &v
 	}
 	return c
 }
@@ -472,44 +536,79 @@ func (fr *FFmpegRecorder) Delete(ctx context.Context) error {
 // ffmpegArgs generates platform-specific ffmpeg command line arguments. Allegedly order matters.
 func ffmpegArgs(params FFmpegRecordingParams, outputPath string) ([]string, error) {
 	var args []string
+	recordAudio := params.recordAudio()
 
 	// Input options first
 	switch runtime.GOOS {
 	case "darwin":
+		// AVFoundation captures video and audio through a single combined input
+		// spec ("<video>:<audio>"), so the audio device is folded in here rather
+		// than added as a separate input.
+		audioDevice := "none"
+		if recordAudio {
+			audioDevice = params.audioSource()
+		}
 		args = []string{
 			// Input options for AVFoundation
 			"-f", "avfoundation",
 			"-framerate", strconv.Itoa(*params.FrameRate),
 			"-pixel_format", "nv12",
 			// Input file
-			"-i", fmt.Sprintf("%d:none", *params.DisplayNum), // Screen capture, no audio
+			"-i", fmt.Sprintf("%d:%s", *params.DisplayNum, audioDevice),
 		}
 	case "linux":
-		args = []string{
+		// When also capturing audio, give the x11grab input a larger packet queue
+		// so the video thread doesn't drop frames while the audio thread jitters
+		// during the mux (the default queue of 8 overflows with two live inputs).
+		// Omitted for video-only to keep that path identical to the pre-audio flags.
+		if recordAudio {
+			args = append(args, "-thread_queue_size", "512")
+		}
+		args = append(args,
 			// Input options for X11
 			"-f", "x11grab",
 			"-framerate", strconv.Itoa(*params.FrameRate),
 			// Input file
 			"-i", fmt.Sprintf(":%d", *params.DisplayNum), // X11 display
+		)
+		if recordAudio {
+			args = append(args, audioInputArgs(params)...)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 
-	// Output options next
-	args = append(args, []string{
+	// Output options next: stream mapping and audio codec when recording audio.
+	if recordAudio {
+		args = append(args, audioOutputArgs()...)
+	}
+	args = append(args,
 		// yuv420p requires even width and height; pad odd source dimensions by one pixel
 		// so libx264 doesn't fail to open the encoder.
 		"-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-
 		// Video encoding
 		"-c:v", "libx264",
+	)
+	if recordAudio {
+		// Real-time-oriented encoding so ffmpeg keeps pace with the live audio+video
+		// mux instead of falling behind and drifting out of sync. Applied only when
+		// recording audio so the video-only path keeps its original encoding.
+		args = append(args, "-preset", "veryfast", "-tune", "zerolatency")
+	}
+	args = append(args, []string{
 		"-profile:v", "high", // Explicit web-compatible profile
 		"-pix_fmt", "yuv420p", // Web-standard pixel format
+	}...)
 
-		// Timestamp handling for reliable playback
-		"-use_wallclock_as_timestamps", "1", // Use system time instead of input stream time
-		"-reset_timestamps", "1", // Reset timestamps to start from zero
+	// Timestamp handling for reliable playback. Single-input video-only capture
+	// overwrites x11grab's timestamps with wall-clock time for stable playback.
+	// With audio we must not: it would stamp the separate video and audio inputs
+	// independently and desync them, so we keep their input PTS instead.
+	if !recordAudio {
+		args = append(args, "-use_wallclock_as_timestamps", "1")
+	}
+	args = append(args, []string{
+		"-reset_timestamps", "1",
 		"-avoid_negative_ts", "make_zero", // Convert negative timestamps to zero
 
 		// Data safety
@@ -528,6 +627,34 @@ func ffmpegArgs(params FFmpegRecordingParams, outputPath string) ([]string, erro
 	args = append(args, outputPath)
 
 	return args, nil
+}
+
+// audioInputArgs returns the ffmpeg input arguments for capturing audio. It is
+// only used on Linux, where audio is a separate PulseAudio input; on darwin the
+// audio device is folded into the avfoundation video input instead.
+func audioInputArgs(params FFmpegRecordingParams) []string {
+	return []string{
+		"-thread_queue_size", "512",
+		"-f", "pulse",
+		"-i", params.audioSource(),
+	}
+}
+
+// audioOutputArgs returns the stream-mapping and audio-codec arguments. The
+// audio stream index differs by platform: darwin folds audio into input 0, while
+// Linux adds it as a second input (index 1).
+func audioOutputArgs() []string {
+	audioMap := "1:a:0"
+	if runtime.GOOS == "darwin" {
+		audioMap = "0:a:0"
+	}
+	return []string{
+		"-map", "0:v:0", "-map", audioMap,
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-ar", "48000",
+		"-ac", "2",
+	}
 }
 
 // waitForCommand should be run in the background to wait for the ffmpeg process to complete and

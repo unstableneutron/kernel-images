@@ -18,6 +18,12 @@ type Config struct {
 	DisplayNum  int    `envconfig:"DISPLAY_NUM" default:"1"`
 	MaxSizeInMB int    `envconfig:"MAX_SIZE_MB" default:"500"`
 	OutputDir   string `envconfig:"OUTPUT_DIR" default:"."`
+	// AudioSource and PulseServer default to empty, i.e. video-only. Setting both
+	// enables audio capture; their values must match the topology defined in
+	// shared/start-pulseaudio.sh (the authority for the sink/source/socket). The
+	// image's supervisor conf sets both.
+	AudioSource string `envconfig:"AUDIO_SOURCE" default:""`
+	PulseServer string `envconfig:"PULSE_SERVER" default:""`
 
 	// Absolute or relative path to the ffmpeg binary. If empty the code falls back to "ffmpeg" on $PATH.
 	PathToFFmpeg string `envconfig:"FFMPEG_PATH" default:"ffmpeg"`
@@ -55,6 +61,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Int("display_num", c.DisplayNum),
 		slog.Int("max_size_mb", c.MaxSizeInMB),
 		slog.String("output_dir", c.OutputDir),
+		slog.String("audio_source", c.AudioSource),
+		slog.String("pulse_server", c.PulseServer),
 		slog.String("ffmpeg_path", c.PathToFFmpeg),
 		slog.Int("devtools_proxy_port", c.DevToolsProxyPort),
 		slog.Bool("log_cdp_messages", c.LogCDPMessages),

@@ -27,6 +27,9 @@ const (
 	dbusSocket     = "/run/dbus/system_bus_socket"
 	defaultDisplay = ":1"
 	defaultIntPort = "9223"
+	// pulseSocket must match the socket path created in shared/start-pulseaudio.sh
+	// (the authority for the audio topology); the wrapper only waits on it here.
+	pulseSocket = "/tmp/pulse/native"
 )
 
 type profile int
@@ -172,11 +175,13 @@ func main() {
 	_ = os.WriteFile(filepath.Join(supervisordLogD, "chromium"), nil, 0o644)
 
 	browserStart := time.Now()
-	startAll(xServer, "dbus", "chromedriver", "chromium")
+	startAll(xServer, "dbus", "chromedriver", "pulseaudio")
 	waitForX(defaultDisplay, 20*time.Second)
 	if prof == profileHeadful {
 		startAll("mutter")
 	}
+	waitForSocket(pulseSocket, 10*time.Second)
+	startAll("chromium")
 	waitForSocket(dbusSocket, 10*time.Second)
 	if prof == profileHeadful && webrtc {
 		startAll("neko")
@@ -222,12 +227,6 @@ func main() {
 		browserDone.Sub(browserStart).Truncate(time.Millisecond),
 		identityDone.Sub(identityStart).Truncate(time.Millisecond),
 		formatProbeDurations(probeDurations))
-
-	// Cosmetic + non-critical services come up off the hot path. Headless has
-	// no audio stack.
-	if prof == profileHeadful {
-		go startAll("pulseaudio")
-	}
 
 	// Re-enable scale-to-zero now that the hot path is up — unless the caller
 	// asked to keep it disabled via ENABLE_STZ=false/0.
