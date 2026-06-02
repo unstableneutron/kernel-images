@@ -120,11 +120,38 @@ func (s *ApiService) PatchDisplay(ctx context.Context, req oapi.PatchDisplayRequ
 			err = s.setResolutionViaNeko(ctx, width, height, refreshRate)
 		} else {
 			log.Info("using xrandr for Xorg resolution change (Neko disabled)")
-			err = s.setResolutionXorgViaXrandr(ctx, width, height, refreshRate, restartChrome)
+			err = s.setResolutionXorgViaXrandr(ctx, width, height, refreshRate)
 		}
-		if err == nil && restartChrome {
-			if restartErr := s.restartChromiumAndWait(ctx, "resolution change"); restartErr != nil {
-				log.Error("failed to restart chromium after resolution change", "error", restartErr)
+		// Re-assert the maximized window state via CDP, then verify the
+		// X root has reached the requested size. Mutter reflows a
+		// maximized (or fullscreen) window onto the new root
+		// automatically, so the CDP call's only job is to make sure the
+		// window is in the state that triggers the reflow. The X root
+		// poll is the authoritative post-condition: it's the value the
+		// server actually set and stays panel-robust if mutter ever
+		// gains a taskbar (a maximized window would then be smaller
+		// than the root by the panel's reserved space).
+		//
+		// Both are fatal on failure — returning 200 with the X root
+		// still at the old size, or the window stuck in normal state,
+		// would leave the caller with no signal of the mismatch. The
+		// previous approach of restarting chromium so it could re-apply
+		// --start-maximized had the same effective contract (the
+		// restart blocked the response) but cost ~9s per resize and
+		// wiped browser-side state (Emulation.* overrides, devtools
+		// sessions). The restart_chromium request field is still
+		// accepted for API compatibility but no longer triggers a
+		// restart on this path.
+		if err == nil {
+			if cdpErr := s.setWindowMaximizedViaCDP(ctx); cdpErr != nil {
+				log.Error("CDP maximize re-assert failed after Xorg resolution change", "error", cdpErr)
+				err = fmt.Errorf("CDP maximize re-assert failed: %w", cdpErr)
+			}
+		}
+		if err == nil {
+			if waitErr := s.waitForXRootSize(ctx, width, height, 3*time.Second); waitErr != nil {
+				log.Error("X root did not reach requested size after resize", "error", waitErr)
+				err = fmt.Errorf("X root verification: %w", waitErr)
 			}
 		}
 	} else if len(stopped) > 0 {
@@ -224,19 +251,30 @@ func (s *ApiService) probeDisplayMode(ctx context.Context) string {
 }
 
 // setResolutionXorgViaXrandr changes resolution for Xorg using xrandr (fallback when Neko is disabled)
-func (s *ApiService) setResolutionXorgViaXrandr(ctx context.Context, width, height, refreshRate int, restartChrome bool) error {
+func (s *ApiService) setResolutionXorgViaXrandr(ctx context.Context, width, height, refreshRate int) error {
 	log := logger.FromContext(ctx)
 	display := s.resolveDisplayFromEnv()
 
-	// Build xrandr command - if refresh rate is specified, use the specific modeline
-	var xrandrCmd string
-	if refreshRate > 0 {
-		modeName := fmt.Sprintf("%dx%d_%d.00", width, height, refreshRate)
-		xrandrCmd = fmt.Sprintf("xrandr --output default --mode %s", modeName)
-		log.Info("using specific modeline", "mode", modeName)
-	} else {
-		xrandrCmd = fmt.Sprintf("xrandr -s %dx%d", width, height)
+	// The headful Xorg dummy driver exposes DUMMY0, not "default". The
+	// historical `xrandr --output default --mode ...` command exits 0 while
+	// silently doing nothing on this driver. Default to DUMMY0 and let an
+	// env var override it for any non-standard image layout.
+	output := strings.TrimSpace(os.Getenv("KERNEL_IMAGES_XRANDR_OUTPUT"))
+	if output == "" {
+		output = "DUMMY0"
 	}
+
+	// Per-output resizing requires --mode <name>; --size is a legacy global
+	// screen option that cannot be combined with --output. Always go through
+	// a named modeline. The schema enum prevents callers from sending zero,
+	// and getCurrentResolution falls back to 60 when xrandr is silent
+	// (Xvfb), but normalize defensively in case either guarantee changes.
+	if refreshRate <= 0 {
+		refreshRate = 60
+	}
+	modeName := fmt.Sprintf("%dx%d_%d.00", width, height, refreshRate)
+	xrandrCmd := fmt.Sprintf("xrandr --output %s --mode %s", output, modeName)
+	log.Info("using specific modeline", "output", output, "mode", modeName)
 
 	args := []string{"-lc", xrandrCmd}
 	env := map[string]string{"DISPLAY": display}
@@ -367,30 +405,107 @@ func (s *ApiService) backgroundResizeXvfb(ctx context.Context, width, height int
 	s.viewportMu.Unlock()
 }
 
-// setViewportViaCDP resizes the browser viewport using the CDP
-// Emulation.setDeviceMetricsOverride command. This is near-instant and does
-// not require restarting Chromium or Xvfb.
-func (s *ApiService) setViewportViaCDP(ctx context.Context, width, height int) error {
-	log := logger.FromContext(ctx)
-
+// withCDPClient dials the current devtools upstream with a 10s timeout,
+// hands the connected client to fn, and closes the connection on return.
+// Lets the small per-call CDP helpers below avoid duplicating the dial +
+// timeout + defer-close scaffolding.
+func (s *ApiService) withCDPClient(ctx context.Context, fn func(context.Context, *cdpclient.Client) error) error {
 	upstreamURL := s.upstreamMgr.Current()
 	if upstreamURL == "" {
 		return fmt.Errorf("devtools upstream not available")
 	}
-
 	cdpCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
 	client, err := cdpclient.Dial(cdpCtx, upstreamURL)
 	if err != nil {
 		return fmt.Errorf("failed to connect to devtools: %w", err)
 	}
 	defer client.Close()
+	return fn(cdpCtx, client)
+}
 
-	if err := client.SetDeviceMetricsOverride(cdpCtx, width, height); err != nil {
+// setWindowMaximizedViaCDP re-asserts that the chromium OS window is in
+// the "maximized" state via Browser.setWindowBounds. After a successful
+// xrandr/Neko resize, mutter reflows a maximized (or fullscreen) window
+// to fill the new root automatically — this call ensures the window is
+// in the state that triggers the reflow. The CDP call is idempotent: it
+// no-ops on a window already in maximized or fullscreen state.
+//
+// The PATCH /display handler waits for the X root to reach the requested
+// size separately (waitForXRootSize) rather than reading the chromium
+// window's own bounds, so the contract stays panel-robust: if mutter
+// ever gained a taskbar/dock, a maximized window would be smaller than
+// the root by the panel's reserved space, and a window-bounds poll
+// would 3s-timeout forever.
+func (s *ApiService) setWindowMaximizedViaCDP(ctx context.Context) error {
+	log := logger.FromContext(ctx)
+	if err := s.withCDPClient(ctx, func(cdpCtx context.Context, client *cdpclient.Client) error {
+		return client.SetWindowBoundsMaximized(cdpCtx)
+	}); err != nil {
+		return fmt.Errorf("CDP setWindowBoundsMaximized: %w", err)
+	}
+	log.Info("re-asserted maximized window state via CDP")
+	return nil
+}
+
+// waitForXRootSize polls the X root resolution via xrandr until it matches
+// the requested size, or the deadline expires. This is the authoritative
+// post-condition for PATCH /display: the X root is what the server set
+// (via Neko or xrandr), and the rest of the stack — mutter, chromium —
+// follows from there. Polling the X root rather than chromium's window
+// bounds keeps the contract panel-robust: a future mutter config with a
+// taskbar/dock would shrink the maximized window below the root size,
+// but the root itself would still match what we asked for.
+//
+// Calls getCurrentResolutionFromXrandr directly rather than the
+// higher-level getCurrentResolution: the latter prefers a cached
+// viewportOverride when one is set, which would silently validate this
+// post-condition against the CDP viewport instead of the X root. The
+// override is only set on the headless Xvfb fast path today, so the
+// Xorg branch never reaches that case — but the invariant is non-local
+// and would silently regress this check if anyone ever sets the
+// override on the Xorg path.
+//
+// Typical convergence is sub-millisecond (Neko's ScreenConfigurationChange
+// returns after the X server has applied the mode), but a small loop
+// covers any future asynchrony in the resize chain.
+func (s *ApiService) waitForXRootSize(ctx context.Context, width, height int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastW, lastH int
+	var lastErr error
+	for {
+		w, h, _, _, err := s.getCurrentResolutionFromXrandr(ctx)
+		lastErr = err
+		if err == nil {
+			lastW, lastH = w, h
+			if w == width && h == height {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("last getCurrentResolutionFromXrandr error: %w", lastErr)
+			}
+			return fmt.Errorf("x root is %dx%d, want %dx%d", lastW, lastH, width, height)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// setViewportViaCDP resizes the browser viewport using the CDP
+// Emulation.setDeviceMetricsOverride command. This is near-instant and does
+// not require restarting Chromium or Xvfb.
+func (s *ApiService) setViewportViaCDP(ctx context.Context, width, height int) error {
+	log := logger.FromContext(ctx)
+	if err := s.withCDPClient(ctx, func(cdpCtx context.Context, client *cdpclient.Client) error {
+		return client.SetDeviceMetricsOverride(cdpCtx, width, height)
+	}); err != nil {
 		return fmt.Errorf("CDP setDeviceMetricsOverride: %w", err)
 	}
-
 	log.Info("viewport resized via CDP", "width", width, "height", height)
 	return nil
 }
