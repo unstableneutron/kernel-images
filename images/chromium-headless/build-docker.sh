@@ -10,4 +10,11 @@ source ../../shared/start-buildkit.sh
 
 # Build the Docker image using the repo root as build context
 # so the Dockerfile's first stage can access the server sources
-(cd "$SCRIPT_DIR/../.." && docker build --platform "$DOCKER_PLATFORM" -f images/chromium-headless/image/Dockerfile -t "$IMAGE" .)
+(cd "$SCRIPT_DIR/../.." && docker build \
+    --platform "$DOCKER_PLATFORM" \
+    --build-arg "UBUNTU_VERSION=${UBUNTU_VERSION:-22.04}" \
+    --build-arg "CHROMIUM_SNAP_CHANNEL=${CHROMIUM_SNAP_CHANNEL:-stable}" \
+    --build-arg "CHROMIUM_SNAP_REVISION=${CHROMIUM_SNAP_REVISION:-3482}" \
+    -f images/chromium-headless/image/Dockerfile \
+    -t "$IMAGE" \
+    .)

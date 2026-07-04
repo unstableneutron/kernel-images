@@ -1,3 +1,5 @@
+ARG UBUNTU_VERSION=22.04
+
 FROM docker.io/golang:1.25.0 AS server-builder
 WORKDIR /workspace/server
 
@@ -54,13 +56,14 @@ COPY images/chromium-headful/client/ .
 RUN --mount=type=cache,target=/root/.npm,id=$CACHEIDPREFIX-npm npm run build
 
 # xorg dependencies
-FROM docker.io/ubuntu:22.04 AS xorg-deps
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS xorg-deps
 WORKDIR /xorg
 
 # Allow cross-compilation when building with BuildKit platforms
+ARG UBUNTU_VERSION=22.04
 ARG TARGETARCH
 ARG TARGETOS
-ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu2204
+ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu${UBUNTU_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
@@ -70,7 +73,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-ap
     echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache; \
     apt-get update; \
     apt-get --no-install-recommends -y install \
-    git gcc pkgconf autoconf automake libtool make xorg-dev xutils-dev;
+    git gcc pkgconf autoconf automake libtool make patch xorg-dev xutils-dev;
 COPY images/chromium-headful/xorg-deps/ /xorg/
 # build xf86-video-dummy v0.3.8 with RandR support
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
@@ -92,12 +95,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-ap
     make -j$(nproc); \
     make install;
 
-FROM docker.io/ubuntu:22.04 AS ffmpeg-downloader
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS ffmpeg-downloader
 
 # Allow cross-compilation when building with BuildKit platforms
+ARG UBUNTU_VERSION=22.04
 ARG TARGETARCH
 ARG TARGETOS
-ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu2204
+ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu${UBUNTU_VERSION}
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
     --mount=type=cache,target=/var/lib/apt,sharing=locked,id=$CACHEIDPREFIX-apt-lib \
@@ -160,18 +164,25 @@ EOT
 
 FROM ghcr.io/kernel/neko/base:3.0.8-v1.6.0 AS neko
 FROM node:22-bullseye-slim AS node-22
-FROM docker.io/ubuntu:22.04
+FROM docker.io/ubuntu:${UBUNTU_VERSION}
 
 # Allow cross-compilation when building with BuildKit platforms
+ARG UBUNTU_VERSION=22.04
 ARG TARGETARCH
 ARG TARGETOS
-ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu2204
+ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu${UBUNTU_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DEBIAN_PRIORITY=high
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
     --mount=type=cache,target=/var/lib/apt,sharing=locked,id=$CACHEIDPREFIX-apt-lib \
+    set -eux; \
+    . /etc/os-release; \
+    case "$VERSION_ID" in \
+        "24.04") NETCAT_PKG="netcat-openbsd" ;; \
+        *) NETCAT_PKG="netcat" ;; \
+    esac; \
     rm -f /etc/apt/apt.conf.d/docker-clean; \
     echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache; \
     apt-get update && \
@@ -189,7 +200,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-ap
     curl \
     # Network tools
     net-tools \
-    netcat \
+    "$NETCAT_PKG" \
     # Userland apps
     x11-apps \
     tint2 \
@@ -242,21 +253,30 @@ ENV USERNAME=root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
     --mount=type=cache,target=/var/lib/apt,sharing=locked,id=$CACHEIDPREFIX-apt-lib \
     set -eux; \
+    . /etc/os-release; \
+    case "$VERSION_ID" in \
+        "24.04") VPX_PKG="libvpx9"; OMX_PKG="" ;; \
+        *) VPX_PKG="libvpx7"; OMX_PKG="gstreamer1.0-omx" ;; \
+    esac; \
     apt-get update; \
     apt-get --no-install-recommends -y install \
     wget ca-certificates supervisor xclip xdotool unclutter \
     pulseaudio dbus-x11 xserver-xorg-video-dummy \
-    libcairo2 libxcb1 libxrandr2 libxv1 libopus0 libvpx7 \
+    libcairo2 libxcb1 libxrandr2 libxv1 libopus0 "$VPX_PKG" \
     x11-xserver-utils \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-    gstreamer1.0-pulseaudio gstreamer1.0-omx; \
+    gstreamer1.0-pulseaudio $OMX_PKG; \
     #
     # install libxcvt0 (not available in debian:bullseye)
     ARCH=$(dpkg --print-architecture); \
-    wget http://ftp.de.debian.org/debian/pool/main/libx/libxcvt/libxcvt0_0.1.2-1_${ARCH}.deb; \
-    apt-get --no-install-recommends install ./libxcvt0_0.1.2-1_${ARCH}.deb; \
-    rm ./libxcvt0_0.1.2-1_${ARCH}.deb; \
+    if [ "$VERSION_ID" = "24.04" ]; then \
+        apt-get --no-install-recommends -y install libxcvt0; \
+    else \
+        wget http://ftp.de.debian.org/debian/pool/main/libx/libxcvt/libxcvt0_0.1.2-1_${ARCH}.deb; \
+        apt-get --no-install-recommends install ./libxcvt0_0.1.2-1_${ARCH}.deb; \
+        rm ./libxcvt0_0.1.2-1_${ARCH}.deb; \
+    fi; \
     #
     # workaround for an X11 problem: http://blog.tigerteufel.de/?p=476
     mkdir /tmp/.X11-unix; \
@@ -275,32 +295,103 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-ap
 # sqlite3 for debugging the cookies file; runtime libs are chrome-for-testing's listed deb.deps.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
     --mount=type=cache,target=/var/lib/apt,sharing=locked,id=$CACHEIDPREFIX-apt-lib \
+    set -eux; \
+    . /etc/os-release; \
+    case "$VERSION_ID" in \
+        "24.04") \
+            ALSA_PKG="libasound2t64"; \
+            ATK_PKG="libatk1.0-0t64"; \
+            ATK_BRIDGE_PKG="libatk-bridge2.0-0t64"; \
+            ATSPI_PKG="libatspi2.0-0t64"; \
+            CUPS_PKG="libcups2t64"; \
+            GLIB_PKG="libglib2.0-0t64"; \
+            GTK_PKG="libgtk-3-0t64"; \
+            ;; \
+        *) \
+            ALSA_PKG="libasound2"; \
+            ATK_PKG="libatk1.0-0"; \
+            ATK_BRIDGE_PKG="libatk-bridge2.0-0"; \
+            ATSPI_PKG="libatspi2.0-0"; \
+            CUPS_PKG="libcups2"; \
+            GLIB_PKG="libglib2.0-0"; \
+            GTK_PKG="libgtk-3-0"; \
+            ;; \
+    esac; \
     apt-get update -y && \
     apt-get --no-install-recommends -y install \
         sqlite3 \
-        libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
-        libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 \
+        "$ALSA_PKG" "$ATK_BRIDGE_PKG" "$ATK_PKG" "$ATSPI_PKG" \
+        "$CUPS_PKG" libdbus-1-3 libdrm2 libgbm1 "$GLIB_PKG" "$GTK_PKG" \
         libnspr4 libnss3 libpango-1.0-0 libxcomposite1 libxdamage1 \
         libxext6 libxfixes3 libxkbcommon0;
 
 # Install Chrome + ChromeDriver as a matched pair from chrome-for-testing so they cannot drift apart.
 ARG CHROME_VERSION=148.0.7778.97
+ARG CHROMIUM_SNAP_CHANNEL=stable
+ARG CHROMIUM_SNAP_REVISION=3482
 RUN set -eux; \
-    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip; \
-    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/cd.zip; \
-    unzip -q /tmp/chrome.zip -d /opt; \
-    unzip -q /tmp/cd.zip -d /tmp; \
-    mv /opt/chrome-linux64 /opt/chrome-for-testing; \
-    mv /opt/chrome-for-testing/chrome /opt/chrome-for-testing/chromium; \
-    ln -sf /opt/chrome-for-testing/chromium /usr/bin/chromium; \
-    mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver; \
-    chmod +x /usr/local/bin/chromedriver /opt/chrome-for-testing/chromium; \
-    rm -rf /tmp/chrome.zip /tmp/cd.zip /tmp/chromedriver-linux64
+    case "${TARGETARCH:-amd64}" in \
+        amd64) \
+            curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip; \
+            curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/cd.zip; \
+            unzip -q /tmp/chrome.zip -d /opt; \
+            unzip -q /tmp/cd.zip -d /tmp; \
+            mv /opt/chrome-linux64 /opt/chrome-for-testing; \
+            mv /opt/chrome-for-testing/chrome /opt/chrome-for-testing/chromium; \
+            ln -sf /opt/chrome-for-testing/chromium /usr/bin/chromium; \
+            mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver; \
+            chmod +x /usr/local/bin/chromedriver /opt/chrome-for-testing/chromium; \
+            rm -rf /tmp/chrome.zip /tmp/cd.zip /tmp/chromedriver-linux64; \
+            ;; \
+        arm64) \
+            apt-get update; \
+            apt-get --no-install-recommends -y install snapd squashfs-tools; \
+            mkdir -p /tmp/chromium-snap; \
+            cd /tmp/chromium-snap; \
+            if [ -n "$CHROMIUM_SNAP_REVISION" ]; then \
+                snap download chromium --revision="$CHROMIUM_SNAP_REVISION"; \
+            else \
+                snap download chromium --channel="$CHROMIUM_SNAP_CHANNEL"; \
+            fi; \
+            rm -rf /opt/chromium-snap; \
+            unsquashfs -q -d /opt/chromium-snap chromium_*.snap; \
+            /opt/chromium-snap/usr/lib/chromium-browser/chrome --version; \
+            /opt/chromium-snap/usr/lib/chromium-browser/chromedriver --version; \
+            printf '%s\n' \
+                '#!/usr/bin/env bash' \
+                'set -euo pipefail' \
+                'export SNAP=/opt/chromium-snap' \
+                'export SNAP_NAME=chromium' \
+                'export SNAP_INSTANCE_NAME=chromium' \
+                'export SNAP_ARCH="$(dpkg --print-architecture)"' \
+                'export CHROME_VERSION_EXTRA="${CHROME_VERSION_EXTRA:-snap-unpacked}"' \
+                'export LD_LIBRARY_PATH="/opt/chromium-snap/usr/lib:/opt/chromium-snap/usr/lib/$(dpkg --print-architecture)-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+                'exec /opt/chromium-snap/usr/lib/chromium-browser/chrome "$@"' \
+                > /usr/bin/chromium; \
+            printf '%s\n' \
+                '#!/usr/bin/env bash' \
+                'set -euo pipefail' \
+                'export SNAP=/opt/chromium-snap' \
+                'export SNAP_NAME=chromium' \
+                'export SNAP_INSTANCE_NAME=chromium' \
+                'export SNAP_ARCH="$(dpkg --print-architecture)"' \
+                'export LD_LIBRARY_PATH="/opt/chromium-snap/usr/lib:/opt/chromium-snap/usr/lib/$(dpkg --print-architecture)-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+                'exec /opt/chromium-snap/usr/lib/chromium-browser/chromedriver "$@"' \
+                > /usr/local/bin/chromedriver; \
+            chmod +x /usr/bin/chromium /usr/local/bin/chromedriver; \
+            apt-get purge -y snapd squashfs-tools; \
+            apt-get autoremove -y; \
+            rm -rf /tmp/chromium-snap /var/lib/apt/lists/* /var/cache/apt/*; \
+            ;; \
+        *) echo "Unsupported Chromium target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
 
-# Chrome for Testing reads managed policies from /etc/opt/chrome_for_testing/policies, but
-# the server writes them to /etc/chromium/policies. Symlink so writes flow to the real path.
-RUN mkdir -p /etc/chromium/policies/managed /etc/opt/chrome_for_testing && \
-    ln -sfn /etc/chromium/policies /etc/opt/chrome_for_testing/policies
+# Chrome for Testing and Ubuntu's Chromium snap read managed policies from
+# different locations. The server writes them to /etc/chromium/policies, so
+# symlink both browser-provider paths there.
+RUN mkdir -p /etc/chromium/policies/managed /etc/opt/chrome_for_testing /etc/chromium-browser && \
+    ln -sfn /etc/chromium/policies /etc/opt/chrome_for_testing/policies && \
+    ln -sfn /etc/chromium/policies /etc/chromium-browser/policies
 COPY shared/chromium-policies/managed/policy.json /etc/chromium/policies/managed/policy.json
 
 # install Node.js 22.x by copying from the node:22-bullseye-slim stage

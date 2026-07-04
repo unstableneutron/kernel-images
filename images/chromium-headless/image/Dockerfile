@@ -1,3 +1,5 @@
+ARG UBUNTU_VERSION=22.04
+
 FROM docker.io/golang:1.25.0 AS server-builder
 WORKDIR /workspace/server
 
@@ -40,12 +42,13 @@ RUN --mount=type=cache,target=/root/.cache/go-build,id=$CACHEIDPREFIX-go-build \
     GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -ldflags="-s -w" -o /out/kernel-images-supervisord-shim ./cmd/supervisord-shim
 
-FROM docker.io/ubuntu:22.04 AS ffmpeg-downloader
+FROM docker.io/ubuntu:${UBUNTU_VERSION} AS ffmpeg-downloader
 
 # Allow cross-compilation when building with BuildKit platforms
+ARG UBUNTU_VERSION=22.04
 ARG TARGETARCH
 ARG TARGETOS
-ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu2204
+ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu${UBUNTU_VERSION}
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
     --mount=type=cache,target=/var/lib/apt,sharing=locked,id=$CACHEIDPREFIX-apt-lib \
@@ -107,29 +110,53 @@ RUN --mount=type=cache,target=/tmp/cache/ffmpeg,sharing=locked,id=$CACHEIDPREFIX
 EOT
 
 FROM node:22-bullseye-slim AS node-22
-FROM docker.io/ubuntu:22.04
+FROM docker.io/ubuntu:${UBUNTU_VERSION}
 
 # Allow cross-compilation when building with BuildKit platforms
+ARG UBUNTU_VERSION=22.04
 ARG TARGETARCH
 ARG TARGETOS
-ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu2204
+ARG CACHEIDPREFIX=${TARGETOS:-linux}-${TARGETARCH:-amd64}-ubuntu${UBUNTU_VERSION}
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-apt-cache \
     --mount=type=cache,target=/var/lib/apt,sharing=locked,id=$CACHEIDPREFIX-apt-lib \
     set -xe; \
+    . /etc/os-release; \
+    case "$VERSION_ID" in \
+        "24.04") \
+            ALSA_PKG="libasound2t64"; \
+            ATK_PKG="libatk1.0-0t64"; \
+            ATK_BRIDGE_PKG="libatk-bridge2.0-0t64"; \
+            ATSPI_PKG="libatspi2.0-0t64"; \
+            CUPS_PKG="libcups2t64"; \
+            GLIB_PKG="libglib2.0-0t64"; \
+            GTK_PKG="libgtk-3-0t64"; \
+            PANGO_PKG="libpango-1.0-0"; \
+            ;; \
+        *) \
+            ALSA_PKG="libasound2"; \
+            ATK_PKG="libatk1.0-0"; \
+            ATK_BRIDGE_PKG="libatk-bridge2.0-0"; \
+            ATSPI_PKG="libatspi2.0-0"; \
+            CUPS_PKG="libcups2"; \
+            GLIB_PKG="libglib2.0-0"; \
+            GTK_PKG="libgtk-3-0"; \
+            PANGO_PKG="libpango1.0-0"; \
+            ;; \
+    esac; \
     rm -f /etc/apt/apt.conf.d/docker-clean; \
     echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache; \
     apt-get -yqq update; \
     apt-get -yqq --no-install-recommends install \
-    libcups2 \
+    "$CUPS_PKG" \
     libnss3 \
-    libatk1.0-0 \
+    "$ATK_PKG" \
     libnspr4 \
-    libpango1.0-0 \
-    libasound2 \
-    libatspi2.0-0 \
+    "$PANGO_PKG" \
+    "$ALSA_PKG" \
+    "$ATSPI_PKG" \
     libxdamage1 \
-    libatk-bridge2.0-0 \
+    "$ATK_BRIDGE_PKG" \
     libxkbcommon0 \
     libdrm2 \
     libxcomposite1 \
@@ -137,8 +164,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-ap
     libxrandr2 \
     libgbm1 \
     libdbus-1-3 \
-    libglib2.0-0 \
-    libgtk-3-0 \
+    "$GLIB_PKG" \
+    "$GTK_PKG" \
     libxext6; \
     apt-get -yqq --no-install-recommends install \
     ca-certificates \
@@ -167,22 +194,71 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=$CACHEIDPREFIX-ap
 
 # Install Chrome + ChromeDriver as a matched pair from chrome-for-testing so they cannot drift apart.
 ARG CHROME_VERSION=148.0.7778.97
+ARG CHROMIUM_SNAP_CHANNEL=stable
+ARG CHROMIUM_SNAP_REVISION=3482
 RUN set -eux; \
-    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip; \
-    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/cd.zip; \
-    unzip -q /tmp/chrome.zip -d /opt; \
-    unzip -q /tmp/cd.zip -d /tmp; \
-    mv /opt/chrome-linux64 /opt/chrome-for-testing; \
-    mv /opt/chrome-for-testing/chrome /opt/chrome-for-testing/chromium; \
-    ln -sf /opt/chrome-for-testing/chromium /usr/bin/chromium; \
-    mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver; \
-    chmod +x /usr/local/bin/chromedriver /opt/chrome-for-testing/chromium; \
-    rm -rf /tmp/chrome.zip /tmp/cd.zip /tmp/chromedriver-linux64
+    case "${TARGETARCH:-amd64}" in \
+        amd64) \
+            curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip; \
+            curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/cd.zip; \
+            unzip -q /tmp/chrome.zip -d /opt; \
+            unzip -q /tmp/cd.zip -d /tmp; \
+            mv /opt/chrome-linux64 /opt/chrome-for-testing; \
+            mv /opt/chrome-for-testing/chrome /opt/chrome-for-testing/chromium; \
+            ln -sf /opt/chrome-for-testing/chromium /usr/bin/chromium; \
+            mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver; \
+            chmod +x /usr/local/bin/chromedriver /opt/chrome-for-testing/chromium; \
+            rm -rf /tmp/chrome.zip /tmp/cd.zip /tmp/chromedriver-linux64; \
+            ;; \
+        arm64) \
+            apt-get update; \
+            apt-get --no-install-recommends -y install snapd squashfs-tools; \
+            mkdir -p /tmp/chromium-snap; \
+            cd /tmp/chromium-snap; \
+            if [ -n "$CHROMIUM_SNAP_REVISION" ]; then \
+                snap download chromium --revision="$CHROMIUM_SNAP_REVISION"; \
+            else \
+                snap download chromium --channel="$CHROMIUM_SNAP_CHANNEL"; \
+            fi; \
+            rm -rf /opt/chromium-snap; \
+            unsquashfs -q -d /opt/chromium-snap chromium_*.snap; \
+            /opt/chromium-snap/usr/lib/chromium-browser/chrome --version; \
+            /opt/chromium-snap/usr/lib/chromium-browser/chromedriver --version; \
+            printf '%s\n' \
+                '#!/usr/bin/env bash' \
+                'set -euo pipefail' \
+                'export SNAP=/opt/chromium-snap' \
+                'export SNAP_NAME=chromium' \
+                'export SNAP_INSTANCE_NAME=chromium' \
+                'export SNAP_ARCH="$(dpkg --print-architecture)"' \
+                'export CHROME_VERSION_EXTRA="${CHROME_VERSION_EXTRA:-snap-unpacked}"' \
+                'export LD_LIBRARY_PATH="/opt/chromium-snap/usr/lib:/opt/chromium-snap/usr/lib/$(dpkg --print-architecture)-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+                'exec /opt/chromium-snap/usr/lib/chromium-browser/chrome "$@"' \
+                > /usr/bin/chromium; \
+            printf '%s\n' \
+                '#!/usr/bin/env bash' \
+                'set -euo pipefail' \
+                'export SNAP=/opt/chromium-snap' \
+                'export SNAP_NAME=chromium' \
+                'export SNAP_INSTANCE_NAME=chromium' \
+                'export SNAP_ARCH="$(dpkg --print-architecture)"' \
+                'export LD_LIBRARY_PATH="/opt/chromium-snap/usr/lib:/opt/chromium-snap/usr/lib/$(dpkg --print-architecture)-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+                'exec /opt/chromium-snap/usr/lib/chromium-browser/chromedriver "$@"' \
+                > /usr/local/bin/chromedriver; \
+            chmod +x /usr/bin/chromium /usr/local/bin/chromedriver; \
+            apt-get purge -y snapd squashfs-tools; \
+            apt-get autoremove -y; \
+            rm -rf /tmp/chromium-snap /var/lib/apt/lists/* /var/cache/apt/*; \
+            ;; \
+        *) echo "Unsupported Chromium target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac
 
-# Chrome for Testing reads managed policies from /etc/opt/chrome_for_testing/policies, but
-# the server writes them to /etc/chromium/policies. Symlink so writes flow to the real path.
-RUN mkdir -p /etc/chromium/policies/managed /etc/opt/chrome_for_testing && \
-    ln -sfn /etc/chromium/policies /etc/opt/chrome_for_testing/policies
+# Chrome for Testing and Ubuntu's Chromium snap read managed policies from
+# different locations. The server writes them to /etc/chromium/policies, so
+# symlink both browser-provider paths there.
+RUN mkdir -p /etc/chromium/policies/managed /etc/opt/chrome_for_testing /etc/chromium-browser && \
+    ln -sfn /etc/chromium/policies /etc/opt/chrome_for_testing/policies && \
+    ln -sfn /etc/chromium/policies /etc/chromium-browser/policies
 COPY shared/chromium-policies/managed/policy.json /etc/chromium/policies/managed/policy.json
 
 # Install FFmpeg (latest static build) for the recording server
