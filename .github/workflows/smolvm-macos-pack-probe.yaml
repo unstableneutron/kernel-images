@@ -1,0 +1,96 @@
+name: smolvm-macos-pack-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      smolvm_version:
+        description: SmolVM version to install
+        required: true
+        type: string
+        default: "1.4.5"
+
+jobs:
+  probe:
+    name: Probe ${{ matrix.runner_label }}
+    runs-on: ${{ matrix.runner_label }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_label:
+          - macos-15
+          - macos-latest
+          - macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Inspect runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          uname -a
+          sw_vers
+          sysctl -n machdep.cpu.brand_string || true
+          sysctl -n hw.optional.arm64 || true
+          df -h / "${RUNNER_TEMP}" "${GITHUB_WORKSPACE}"
+
+      - name: Install smolvm
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl -sSL https://smolmachines.com/install.sh | bash -s -- \
+            --version "${SMOLVM_VERSION}" \
+            --no-modify-path
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+          "${HOME}/.local/bin/smolvm" --version
+        env:
+          SMOLVM_VERSION: ${{ inputs.smolvm_version }}
+
+      - name: Inspect smolvm pack support
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          smolvm machine --help
+          smolvm pack create --help
+
+      - name: Create minimal SmolVM pack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${RUNNER_TEMP}/smolvm-pack-output" "${RUNNER_TEMP}/smolvm-pack-staging"
+          cat > "${RUNNER_TEMP}/alpine-probe.smolfile" <<'EOF'
+          image = 'alpine:latest'
+          entrypoint = ['/bin/sh', '-lc', 'echo smolvm-macos-pack-probe && sleep 1']
+          cpus = 1
+          memory = 512
+          net = false
+
+          [artifact]
+          oci_platform = 'linux/arm64'
+          EOF
+
+          cat "${RUNNER_TEMP}/alpine-probe.smolfile"
+          smolvm pack create \
+            --smolfile "${RUNNER_TEMP}/alpine-probe.smolfile" \
+            --oci-platform linux/arm64 \
+            --staging-dir "${RUNNER_TEMP}/smolvm-pack-staging" \
+            --output "${RUNNER_TEMP}/smolvm-pack-output/alpine-probe-${{ matrix.runner_label }}"
+          test -s "${RUNNER_TEMP}/smolvm-pack-output/alpine-probe-${{ matrix.runner_label }}.smolmachine"
+          ls -lh "${RUNNER_TEMP}/smolvm-pack-output"
+
+      - name: Upload probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smolvm-macos-pack-probe-${{ matrix.runner_label }}
+          path: |
+            ${{ runner.temp }}/alpine-probe.smolfile
+            ${{ runner.temp }}/smolvm-pack-output/*
+          if-no-files-found: ignore
