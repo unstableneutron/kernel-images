@@ -21,10 +21,13 @@ jobs:
             arch: amd64
             platform: linux/amd64
             runner: ubuntu-24.04
+          # GitHub's hosted arm64 runner does not currently expose /dev/kvm.
+          # smolvm pack create can still select arm64 OCI layers via
+          # --oci-platform, so run pack creation on the amd64 KVM runner.
           - image_type: chromium-headless
             arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-24.04
           - image_type: chromium-headful
             arch: amd64
             platform: linux/amd64
@@ -32,7 +35,7 @@ jobs:
           - image_type: chromium-headful
             arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
