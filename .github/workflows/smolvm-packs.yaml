@@ -50,7 +50,7 @@ jobs:
           image_ref="ghcr.io/${GITHUB_REPOSITORY}/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-${short_sha}"
           pack_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-forkready-${short_sha}"
           pack_ref_mutable="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-forkready"
-          output_base="dist/${{ matrix.image_type }}-ubuntu24-${{ matrix.arch }}-forkready"
+          output_base="/mnt/smolvm-pack-output/${{ matrix.image_type }}-ubuntu24-${{ matrix.arch }}-forkready"
           smolfile="dist/${{ matrix.image_type }}-ubuntu24-${{ matrix.arch }}.smolfile"
 
           {
@@ -128,10 +128,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          sudo mkdir -p /mnt/smolvm-pack-output /mnt/smolvm-pack-staging
+          sudo chown -R "$(id -u):$(id -g)" /mnt/smolvm-pack-output /mnt/smolvm-pack-staging
+          df -h / /mnt "${RUNNER_TEMP}"
+
           smolvm pack create \
             --smolfile "${SMOLFILE}" \
             --oci-platform "${{ matrix.platform }}" \
-            --staging-dir "${RUNNER_TEMP}/smolvm-pack-${{ matrix.image_type }}-${{ matrix.arch }}" \
+            --staging-dir "/mnt/smolvm-pack-staging/${{ matrix.image_type }}-${{ matrix.arch }}" \
             --output "${OUTPUT_BASE}"
           test -s "${SIDECAR}"
           ls -lh "${OUTPUT_BASE}" "${SIDECAR}"
