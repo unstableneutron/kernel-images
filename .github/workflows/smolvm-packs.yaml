@@ -1,0 +1,159 @@
+name: smolvm-packs
+
+on:
+  workflow_call:
+
+env:
+  SMOLVM_VERSION: "1.4.5"
+
+jobs:
+  pack:
+    name: Pack ${{ matrix.image_type }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_type: chromium-headless
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - image_type: chromium-headless
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - image_type: chromium-headful
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - image_type: chromium-headful
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute refs
+        id: refs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          image_ref="ghcr.io/${GITHUB_REPOSITORY}/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-${short_sha}"
+          pack_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-forkready-${short_sha}"
+          pack_ref_mutable="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-forkready"
+          output_base="dist/${{ matrix.image_type }}-ubuntu24-${{ matrix.arch }}-forkready"
+          smolfile="dist/${{ matrix.image_type }}-ubuntu24-${{ matrix.arch }}.smolfile"
+
+          {
+            echo "short_sha=${short_sha}"
+            echo "image_ref=${image_ref}"
+            echo "pack_ref=${pack_ref}"
+            echo "pack_ref_mutable=${pack_ref_mutable}"
+            echo "output_base=${output_base}"
+            echo "sidecar=${output_base}.smolmachine"
+            echo "smolfile=${smolfile}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install smolvm
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl -sSL https://smolmachines.com/install.sh | bash -s -- \
+            --version "${SMOLVM_VERSION}" \
+            --no-modify-path
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+          "${HOME}/.local/bin/smolvm" --version
+
+      - name: Enable KVM group permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -e /dev/kvm ]]; then
+            echo "::error::/dev/kvm is required for smolvm pack create on Linux runners"
+            exit 1
+          fi
+
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Configure GHCR for smolvm
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${HOME}/.config/smolvm"
+          cat > "${HOME}/.config/smolvm/config.toml" <<EOF
+          [machines.registries."ghcr.io"]
+          username = "${GITHUB_ACTOR}"
+          password_env = "GHCR_TOKEN"
+
+          [images.registries."ghcr.io"]
+          username = "${GITHUB_ACTOR}"
+          password_env = "GHCR_TOKEN"
+          EOF
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Smolfile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          scripts/generate-smolvm-pack-smolfile.sh \
+            "${{ matrix.image_type }}" \
+            "${IMAGE_REF}" \
+            "${{ matrix.platform }}" \
+            "${SMOLFILE}"
+          cat "${SMOLFILE}"
+        env:
+          IMAGE_REF: ${{ steps.refs.outputs.image_ref }}
+          SMOLFILE: ${{ steps.refs.outputs.smolfile }}
+
+      - name: Create SmolVM pack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          smolvm pack create \
+            --smolfile "${SMOLFILE}" \
+            --oci-platform "${{ matrix.platform }}" \
+            --staging-dir "${RUNNER_TEMP}/smolvm-pack-${{ matrix.image_type }}-${{ matrix.arch }}" \
+            --output "${OUTPUT_BASE}"
+          test -s "${SIDECAR}"
+          ls -lh "${OUTPUT_BASE}" "${SIDECAR}"
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_BASE: ${{ steps.refs.outputs.output_base }}
+          SIDECAR: ${{ steps.refs.outputs.sidecar }}
+          SMOLFILE: ${{ steps.refs.outputs.smolfile }}
+
+      - name: Push SmolVM pack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          smolvm pack push --file "${SIDECAR}" "${PACK_REF}"
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            smolvm pack push --file "${SIDECAR}" "${PACK_REF_MUTABLE}"
+          fi
+
+          smolvm pack inspect --json "${PACK_REF}"
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            smolvm pack inspect --json "${PACK_REF_MUTABLE}"
+          fi
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACK_REF: ${{ steps.refs.outputs.pack_ref }}
+          PACK_REF_MUTABLE: ${{ steps.refs.outputs.pack_ref_mutable }}
+          SIDECAR: ${{ steps.refs.outputs.sidecar }}
