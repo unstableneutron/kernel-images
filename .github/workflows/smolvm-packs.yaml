@@ -150,17 +150,39 @@ jobs:
         run: |
           set -euo pipefail
 
+          host_platform="linux/unknown"
+          case "$(uname -m)" in
+            x86_64)
+              host_platform="linux/amd64"
+              ;;
+            aarch64|arm64)
+              host_platform="linux/arm64"
+              ;;
+          esac
+
+          inspect_pack() {
+            local ref="$1"
+
+            if [[ "${PACK_PLATFORM}" == "${host_platform}" ]]; then
+              smolvm pack inspect --json "${ref}"
+            else
+              echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin >/dev/null
+              docker buildx imagetools inspect "${ref}"
+            fi
+          }
+
           smolvm pack push --file "${SIDECAR}" "${PACK_REF}"
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
             smolvm pack push --file "${SIDECAR}" "${PACK_REF_MUTABLE}"
           fi
 
-          smolvm pack inspect --json "${PACK_REF}"
+          inspect_pack "${PACK_REF}"
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            smolvm pack inspect --json "${PACK_REF_MUTABLE}"
+            inspect_pack "${PACK_REF_MUTABLE}"
           fi
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACK_PLATFORM: ${{ matrix.platform }}
           PACK_REF: ${{ steps.refs.outputs.pack_ref }}
           PACK_REF_MUTABLE: ${{ steps.refs.outputs.pack_ref_mutable }}
           SIDECAR: ${{ steps.refs.outputs.sidecar }}

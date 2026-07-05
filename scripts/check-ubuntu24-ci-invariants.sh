@@ -81,6 +81,7 @@ require_in_workflows "https://smolmachines.com/install.sh" "workflow installs sm
 require_in_workflows "/dev/kvm" "workflow checks KVM availability for smolvm packing"
 require_in_workflows "smolvm pack create" "workflow creates smolvm packs"
 require_in_workflows "smolvm pack push" "workflow pushes smolvm packs"
+require_in_workflows "docker buildx imagetools inspect" "workflow inspects cross-arch smolvm packs"
 require_in_workflows "kernel-smolmachines/" "workflow uses kernel-smolmachines package path"
 
 echo "Ubuntu 24 CI invariants satisfied"
