@@ -83,5 +83,7 @@ require_in_workflows "smolvm pack create" "workflow creates smolvm packs"
 require_in_workflows "smolvm pack push" "workflow pushes smolvm packs"
 require_in_workflows "docker buildx imagetools inspect" "workflow inspects cross-arch smolvm packs"
 require_in_workflows "kernel-smolmachines/" "workflow uses kernel-smolmachines package path"
+require_in_workflows "host_platform: linux-amd64" "workflow records smolvm pack host platform"
+require_in_workflows "-guest-" "workflow scopes smolvm pack tags by guest platform"
 
 echo "Ubuntu 24 CI invariants satisfied"

@@ -19,6 +19,7 @@ jobs:
         include:
           - image_type: chromium-headless
             arch: amd64
+            host_platform: linux-amd64
             platform: linux/amd64
             runner: ubuntu-24.04
           # GitHub's hosted arm64 runner does not currently expose /dev/kvm.
@@ -26,14 +27,17 @@ jobs:
           # --oci-platform, so run pack creation on the amd64 KVM runner.
           - image_type: chromium-headless
             arch: arm64
+            host_platform: linux-amd64
             platform: linux/arm64
             runner: ubuntu-24.04
           - image_type: chromium-headful
             arch: amd64
+            host_platform: linux-amd64
             platform: linux/amd64
             runner: ubuntu-24.04
           - image_type: chromium-headful
             arch: arm64
+            host_platform: linux-amd64
             platform: linux/arm64
             runner: ubuntu-24.04
     steps:
@@ -48,9 +52,9 @@ jobs:
 
           short_sha="${GITHUB_SHA::7}"
           image_ref="ghcr.io/${GITHUB_REPOSITORY}/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-${short_sha}"
-          pack_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-forkready-${short_sha}"
-          pack_ref_mutable="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.arch }}-forkready"
-          output_base="/mnt/smolvm-pack-output/${{ matrix.image_type }}-ubuntu24-${{ matrix.arch }}-forkready"
+          pack_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.host_platform }}-guest-${{ matrix.arch }}-forkready-${short_sha}"
+          pack_ref_mutable="ghcr.io/${GITHUB_REPOSITORY_OWNER}/kernel-smolmachines/${{ matrix.image_type }}:ubuntu24-${{ matrix.host_platform }}-guest-${{ matrix.arch }}-forkready"
+          output_base="/mnt/smolvm-pack-output/${{ matrix.image_type }}-ubuntu24-${{ matrix.host_platform }}-guest-${{ matrix.arch }}-forkready"
           smolfile="dist/${{ matrix.image_type }}-ubuntu24-${{ matrix.arch }}.smolfile"
 
           {
